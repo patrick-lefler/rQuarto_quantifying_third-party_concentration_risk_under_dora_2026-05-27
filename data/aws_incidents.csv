@@ -1,0 +1,1 @@
+provider,incident_id,start_ts,end_ts,duration_hours,severity_tier,affected_region,affected_service,source_url,data_tier

@@ -1,0 +1,4 @@
+provider,incident_id,start_ts,end_ts,duration_hours,severity_tier,affected_region,affected_service,source_url,data_tier
+SAP,SAP-2024-EU10-01,2024-04-17T06:00:00Z,2024-04-17T12:00:00Z,6,partial_outage,EU10 (Frankfurt),SAP BTP — Cloud Foundry runtime degradation,https://www.sap.com/about/trust-center/cloud-service-status.html,A
+SAP,SAP-2023-EU20-01,2023-11-08T10:00:00Z,2023-11-08T16:30:00Z,6.5,partial_outage,EU20 (Netherlands),SAP BTP — HANA Cloud connectivity issues,https://www.sap.com/about/trust-center/cloud-service-status.html,A
+SAP,SAP-2022-EU10-01,2022-07-19T08:00:00Z,2022-07-19T14:00:00Z,6,degraded,EU10 (Frankfurt),SAP S/4HANA Cloud — elevated error rates,https://www.sap.com/about/trust-center/cloud-service-status.html,A

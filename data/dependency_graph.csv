@@ -1,0 +1,11 @@
+from_node,to_node,edge_type,criticality,sub_outsourcing_tier,service_category,ctpp_designated,notes
+FIRM,AWS,direct,CIF,1,cloud_infrastructure,TRUE,Primary cloud — portfolio management system and analytics data lake on AWS eu-central-1
+FIRM,AZURE,direct,CIF,1,cloud_infrastructure,TRUE,Microsoft 365 / Entra ID identity layer — required for all internal system access
+FIRM,TradeSaaS,direct,CIF,1,order_management,FALSE,Third-party EMS/OMS SaaS — direct contract; vendor's infrastructure runs on AWS
+TradeSaaS,AWS,sub_outsourced,CIF,2,order_management,TRUE,TradeSaaS infrastructure hosted on AWS eu-west-1 — confirmed in vendor's TPRA response
+FIRM,Bloomberg,direct,CIF,1,market_data,FALSE,Bloomberg Terminal and B-PIPE data feed — non-designated; included for completeness
+FIRM,EUROCLEAR,direct,CIF,1,settlement_custody,TRUE,Direct Euroclear Bank participant for UCITS fund settlement; euro securities
+FIRM,RegReportSaaS,direct,non_CIF,1,regulatory_reporting,FALSE,SaaS regulatory reporting platform (EMIR / AIFMD / MiFID II) — runs on Azure
+RegReportSaaS,AZURE,sub_outsourced,non_CIF,2,regulatory_reporting,TRUE,RegReportSaaS hosted on Azure West Europe — confirmed in vendor SOC 2 report
+FIRM,EQUINIX,direct,CIF,1,network_connectivity,TRUE,Co-location at Equinix FR2 Frankfurt for direct market connectivity
+FIRM,SWIFT,direct,CIF,1,settlement_custody,TRUE,SWIFT direct participant — fund transfer instructions and custodian SWIFT messages

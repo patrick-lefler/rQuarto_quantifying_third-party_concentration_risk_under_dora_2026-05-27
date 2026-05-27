@@ -1,0 +1,2 @@
+provider,incident_id,start_ts,end_ts,duration_hours,severity_tier,affected_region,affected_service,source_url,data_tier,notes
+SWIFT,SWIFT-2024-001,2024-07-18T08:00:00Z,2024-07-18T14:30:00Z,6.5,partial_outage,Global,SWIFT messaging processing delay,https://www.swift.com/news-events/news/swift-operational-update,B,"Publicly disclosed on swift.com 2024-07-18. Duration estimated from disclosure text ('successfully restored impacted services' same day). Not cyber-related per SWIFT statement."

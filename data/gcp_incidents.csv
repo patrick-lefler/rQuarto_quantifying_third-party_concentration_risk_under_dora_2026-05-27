@@ -1,0 +1,2 @@
+provider,incident_id,start_ts,end_ts,duration_hours,severity_tier,affected_region,affected_service,source_url,data_tier
+GCP,12995900318995415150,2025-06-12 17:51:00,2025-06-13 01:18:00,7.45,degraded,europe-central2,API Gateway VzyLPL7CtWQqJ9WeKAjp Agent Assist eUntUKqUrHdbBLNcVVXq AlloyDB for PostgreSQL fPovtKbaWN9UTepMm3kJ Apigee 9Y13BNFy4fJydvjdsN3X Apigee Edge Public Cloud SumcdgBT6GQBzp1vmdXu Apigee Hybri...,https://status.cloud.google.com/incidents/ow5i3PPK96RduMcb1SsW,A

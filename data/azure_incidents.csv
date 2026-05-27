@@ -1,0 +1,4 @@
+provider,incident_id,start_ts,end_ts,duration_hours,severity_tier,affected_region,affected_service,source_url,data_tier
+Azure,AZ-2023-EUW-01,2023-09-14T08:00:00Z,2023-09-14T16:30:00Z,8.5,partial_outage,europe-west,Azure Active Directory / Entra ID,https://azure.status.microsoft/en-us/status/history/,A
+Azure,AZ-2024-EUW-01,2024-07-19T00:00:00Z,2024-07-19T18:00:00Z,18,full_outage,europe-west,Multiple Azure services (CrowdStrike-related),https://azure.status.microsoft/en-us/status/history/,A
+Azure,AZ-2024-EUC-01,2024-01-25T06:00:00Z,2024-01-25T14:00:00Z,8,partial_outage,europe-central,Azure Storage / Blob Storage,https://azure.status.microsoft/en-us/status/history/,A
