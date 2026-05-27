@@ -4,7 +4,9 @@
 > board-level business interruption loss distribution for a mid-market EU asset manager.
 
 **Author:** Patrick Lefler
+
 **Published:** 2026-05-27
+
 **Rendered:** 
 
 ---
