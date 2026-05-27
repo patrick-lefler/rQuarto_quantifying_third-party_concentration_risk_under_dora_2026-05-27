@@ -1,0 +1,4 @@
+provider,incident_id,start_ts,end_ts,duration_hours,severity_tier,affected_region,affected_service,source_url,data_tier
+Equinix,EQ-2025-MA1-01,2025-04-01T10:00:00Z,2025-04-01T13:00:00Z,3.0,partial_outage,MA1,Network Component Issue (Metro Connect) — Equinix MA1 Madrid,https://status.equinix.com,A
+Equinix,EQ-2024-LD9-01,2024-01-18T12:40:00Z,2024-01-18T18:00:00Z,5.3,partial_outage,LD9,Loss of resilience — Equinix LD9 London (power feed issue),https://www.datacenterknowledge.com/outages/equinix-london-data-center-outage-affected-clients-without-redundant-connections-,A
+Equinix,EQ-2023-MB-01,2023-06-15T04:37:00Z,2023-06-15T04:43:00Z,0.1,degraded,EU,Network issue — Equinix AT metro (brief traffic impact),https://status.equinix.com,A

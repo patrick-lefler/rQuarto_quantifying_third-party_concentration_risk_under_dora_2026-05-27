@@ -1,0 +1,6 @@
+domain_id,ctpps,services_at_risk,n_ctpps,n_services,contains_cif
+1,AWS,"AWS, TradeSaaS",1,2,TRUE
+2,AZURE,"AZURE, RegReportSaaS",1,2,TRUE
+3,EQUINIX,EQUINIX,1,1,TRUE
+4,EUROCLEAR,EUROCLEAR,1,1,TRUE
+5,SWIFT,SWIFT,1,1,TRUE

@@ -1,0 +1,10 @@
+name,node_type,ctpp_designated,service_category,any_cif
+FIRM,firm,FALSE,root,TRUE
+TradeSaaS,vendor,FALSE,order_management,TRUE
+RegReportSaaS,vendor,FALSE,regulatory_reporting,FALSE
+AWS,ctpp,TRUE,cloud_infrastructure,TRUE
+AZURE,ctpp,TRUE,cloud_infrastructure,TRUE
+Bloomberg,vendor,FALSE,market_data,TRUE
+EUROCLEAR,ctpp,TRUE,settlement_custody,TRUE
+EQUINIX,ctpp,TRUE,network_connectivity,TRUE
+SWIFT,ctpp,TRUE,settlement_custody,TRUE
