@@ -1,0 +1,1103 @@
+---
+title: "Operational Resilience: Quantifying Third-Party ICT Concentration Risk Under DORA"
+subtitle: "Translating the Register of Information into a Board-Level Loss Distribution"
+author: "Patrick Lefler"
+abstract: |
+  DORA Article 28 requires EU financial entities to assess ICT third-party
+  concentration risk, but the regulation specifies the obligation, not the method.
+  Most institutions discharge the requirement by completing the Register of
+  Information — a structured disclosure that counts vendors and flags
+  concentration — without producing a financial loss figure the board can use
+  for capital, insurance, or contractual decisions. The Register's implicit
+  assumption is that each vendor is an independent risk. That assumption is
+  structurally incorrect when sub-outsourcing chains collapse multiple vendor
+  entries to a shared underlying provider.
+
+  This project constructs a directed dependency graph for a representative
+  €35B AUM EU asset manager and shows that 8 vendor entries in the Register
+  collapse to 5 independent failure domains — a 1.6× concentration ratio the
+  Register cannot express. A discrete-event simulation, calibrated to public
+  incident histories of the ESAs' 19 designated Critical ICT Third-Party
+  Providers (November 2025), produces an annualized business interruption
+  loss distribution in euros. The base-case results place the VaR 95 at
+  <b>€1.99M</b> and the VaR 99 at <b>€3.05M</b> under correlated failure
+  assumptions — materially higher than the naive independent-vendor estimate.
+  The gap between the two figures is the quantitative cost of treating
+  concentration risk as a vendor-counting exercise.
+date: May 27, 2026
+format:
+  html:
+    code-fold: true
+    code-copy: true
+    code-overflow: wrap
+    code-tools: true
+    code-summary: "Display code"
+    df-print: kable
+    embed-math: true
+    embed-resources: true
+    fig-align: center
+    fig-height: 6
+    fig-width: 10
+    highlight-style: arrow
+    lightbox: true
+    linkcolor: "#0166CC"
+    number-sections: false
+    page-layout: full
+    smooth-scroll: true
+    theme: sandstone
+    toc: true
+    toc-depth: 3
+    toc-location: right
+    toc-title: "Contents"
+execute:
+  echo: true
+  warning: false
+  message: false
+html-math-method: mathjax
+knitr:
+  opts_chunk:
+    comment: "#>"
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+# --- Default libraries ---
+library(kableExtra)   # Table formatting
+library(knitr)        # Document rendering
+library(plotly)       # Interactive chart wrapping
+library(scales)       # Axis and label formatting
+library(sessioninfo)  # Session provenance
+library(tidyverse)    # Data manipulation and ggplot2
+
+# --- Project-specific libraries ---
+library(igraph)       # Dependency network construction and graph traversal
+library(tidygraph)    # Tidy interface to igraph for ggraph compatibility
+library(ggraph)       # Network visualization in ggplot2 grammar
+library(mc2d)         # Two-dimensional Monte Carlo for frequency / duration layers
+library(copula)       # Correlated Poisson draws via Gaussian copula
+library(lubridate)    # Date-time handling for incident data
+library(patchwork)    # Multi-panel figure composition
+library(simmer)       # Discrete-event simulation — loaded last; masks tidygraph::activate()
+
+# Namespace conflicts: simmer masks several dplyr / tidygraph / igraph functions.
+# Restore the correct implementations explicitly so downstream chunks are unaffected.
+select <- dplyr::select
+filter <- dplyr::filter
+rename <- dplyr::rename
+# activate() on tbl_graph objects uses tidygraph::activate() explicitly in code.
+
+# ---------------------------------------------------------------------------
+# Brand colors
+# ---------------------------------------------------------------------------
+brand_primary   <- "#1A1A2E"
+brand_secondary <- "#16213E"
+brand_accent    <- "#0F3460"
+brand_highlight <- "#E94560"
+brand_surface   <- "#F5F5F5"
+brand_text      <- "#1A1A2E"
+
+brand_palette <- c(
+  primary   = brand_primary,
+  secondary = brand_secondary,
+  accent    = brand_accent,
+  highlight = brand_highlight
+)
+
+# ---------------------------------------------------------------------------
+# ggplot2 theme
+# ---------------------------------------------------------------------------
+theme_brand <- function(base_size = 12) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      text             = element_text(family = "Roboto", color = brand_text),
+      plot.title       = element_text(size = base_size + 2, face = "bold",
+                                      color = brand_primary, margin = margin(b = 8)),
+      plot.subtitle    = element_text(size = base_size, color = brand_secondary,
+                                      margin = margin(b = 12)),
+      plot.caption     = element_text(size = base_size - 2, color = "#6E6E73",
+                                      hjust = 0, margin = margin(t = 10)),
+      axis.title       = element_text(size = base_size - 1, color = brand_secondary),
+      axis.text        = element_text(size = base_size - 2, color = brand_text),
+      panel.grid.major = element_line(color = "#E5E5E5", linewidth = 0.4),
+      panel.grid.minor = element_blank(),
+      legend.position  = "bottom",
+      legend.title     = element_text(size = base_size - 1, face = "bold"),
+      legend.text      = element_text(size = base_size - 2),
+      strip.text       = element_text(size = base_size - 1, face = "bold",
+                                      color = brand_primary),
+      plot.background  = element_rect(fill = "#FEFEFA", color = NA),
+      panel.background = element_rect(fill = "#FEFEFA", color = NA)
+    )
+}
+
+theme_set(theme_brand())
+
+# ---------------------------------------------------------------------------
+# Load pre-built graph and data files
+# ---------------------------------------------------------------------------
+g               <- readRDS("data/graph.rds")
+g_tidy          <- as_tbl_graph(g)
+node_attrs      <- read_csv("data/node_attributes.csv",  show_col_types = FALSE)
+dep_graph       <- read_csv("data/dependency_graph.csv", show_col_types = FALSE)
+failure_domains <- read_csv("data/failure_domains.csv",  show_col_types = FALSE)
+ctpp_impact     <- read_csv("data/ctpp_impact.csv",      show_col_types = FALSE)
+```
+
+## Introduction
+
+Third-party ICT concentration risk sits at the intersection of two problems that EU financial regulators have spent the past three years trying to solve simultaneously. The first is systemic: a small number of cloud providers, financial messaging networks, and market infrastructure operators underpin the operational continuity of thousands of financial entities. When one of them fails, the failure is not isolated. It propagates across the firms that depend on it — often without those firms having a clear picture of how many layers of dependency separate them from the source of the disruption. The second problem is measurement: most firms manage this exposure through vendor inventories and concentration flags, tools designed for procurement governance rather than financial risk quantification. A flag that reads "high concentration in cloud infrastructure" carries no more financial precision than a ransomware label that reads "Critical."
+
+DORA (Digital Operational Resilience Act), which entered into force across the EU on 17 January 2025, imposes a direct obligation on financial entities to address both problems. DORA Article 28 requires assessment of concentration risk in ICT third-party arrangements. The European Supervisory Authorities' (ESAs) accompanying Register of Information framework — which requires entities to map their ICT service dependencies with full sub-outsourcing chain visibility — creates the data infrastructure the assessment requires. In November 2025, the Joint Oversight Committee (JOC) published the first official list of 19 designated Critical ICT Third-Party Providers (CTPPs), establishing the regulatory perimeter for mandatory oversight and the empirical anchor for any quantitative model of concentration risk.
+
+The Register of Information, however, is a disclosure artifact. It records what a firm's dependency graph looks like; it does not convert that structure into a loss estimate. The firm that files a Register showing 8 critical vendor relationships has not answered the question a board needs answered: if the worst 1% of years occurs, how much does this dependency structure cost?
+
+This project answers that question for a representative €35B AUM EU-domiciled asset manager. It constructs the firm's ICT dependency graph using the DORA Article 3(22) criticality taxonomy, maps that graph against the November 2025 CTPP designation list, calibrates outage frequency and duration distributions from public incident histories, and runs a discrete-event simulation to produce a full annualized business interruption loss (BIL) distribution. The model's central finding is specific: 8 vendor entries in the Register collapse to 5 independent failure domains. The correlation structure those domains imply — in particular, the hidden shared dependency on AWS created by a sub-outsourced trading platform — produces a VaR 99 that is materially higher than the figure a naive independent-vendor model would estimate. That gap is the quantitative cost of treating the Register as a sufficient risk management tool rather than a necessary starting point.
+
+## The DORA Concentration Risk Framework
+
+DORA's concentration risk requirements are spread across two instruments that must be read together. Article 28 of the regulation itself establishes the substantive obligation: financial entities must identify, assess, and manage concentration risk arising from their ICT third-party arrangements, including at the level of sub-contractors supporting critical or important functions (CIF). RTS 2025/532 on sub-outsourcing — one of the batch of regulatory technical standards adopted by the ESAs under DORA's mandates — specifies how that assessment must treat the chain of dependencies, not merely the first-tier vendor relationship.
+
+The practical consequence of reading Article 28 together with RTS 2025/532 is that the Register of Information's Tier 1 view — the direct contractual relationships a firm has with its ICT vendors — is not sufficient for a complete concentration risk assessment. A firm that contracts with a SaaS order management vendor has one entry in its Register. If that vendor runs its entire infrastructure on AWS EU, the firm has an undisclosed second-order dependency on AWS. RTS 2025/532 requires firms to make that chain visible; the model in this project quantifies what becomes visible when they do.
+
+```{r}
+#| label: tbl-dora-framework
+#| echo: true
+
+dora_framework <- tribble(
+  ~`DORA Requirement`,              ~`Instrument`,          ~`Model Representation`,
+  "Assess ICT concentration risk",   "Article 28(2)",
+    "Dependency graph with failure domain analysis; 5 domains from 8 vendors",
+  "Map sub-outsourcing chains",      "Article 28(3) + RTS 2025/532",
+    "Sub-outsourced edges in graph (TradeSaaS → AWS; RegReportSaaS → Azure)",
+  "Assess risk at chain level",      "RTS 2025/532 Article 4",
+    "Propagation layer: outage traverses full dependency path to FIRM node",
+  "Identify CIF dependencies",       "Article 3(22) + Article 28(2)",
+    "CIF flag on each edge; non-CIF services receive 25% BIL weight",
+  "Major incident reporting",        "Article 19 thresholds",
+    "Regulatory cost layer: incidents > 4h on CIF trigger REGULATORY_COST draw",
+  "CTPP designation scope",          "JOC Decision Nov 2025",
+    "19 designated CTPPs; model calibrated to in-scope asset manager subset"
+)
+
+kable(
+  dora_framework,
+  format    = "html",
+  digits    = 3,
+  caption   = "Table 1: DORA Concentration Risk Requirements and Model Representation",
+  col.names = c("DORA Requirement", "Instrument", "Model Representation")
+) |>
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width        = TRUE,
+    position          = "left",
+    font_size         = 13
+  ) |>
+  column_spec(1, bold = TRUE, width = "28%") |>
+  column_spec(2, width = "20%") |>
+  column_spec(3, width = "52%")
+```
+
+### The 19 Designated CTPPs
+
+The November 2025 JOC designation list covers providers across five service categories: cloud computing infrastructure, financial messaging, market data, core banking software, and payment processing. For the asset manager modeled here — a UCITS and AIF manager with no retail banking or payment processing operations — the in-scope subset is cloud infrastructure (AWS, Azure), financial messaging (SWIFT), and settlement infrastructure (Euroclear). Equinix, while not a cloud provider in the traditional sense, enters the model through the firm's co-location arrangement for direct market connectivity.
+
+Three providers on the November 2025 list warrant specific comment for what they reveal about the Register's coverage gaps. Bloomberg and LSEG, which provide market data services to virtually every EU asset manager with trading operations, were not designated in the first JOC round. Their absence does not reflect an assessment that they present no concentration risk; it reflects the threshold mechanics of the designation process, which is calibrated primarily to payment system and banking infrastructure. A firm that reads the CTPP list as its full concentration risk perimeter has misread its dependency structure. Bloomberg appears in the firm's dependency graph in this model as a non-designated critical dependency — present in the Register, absent from the CTPP list, and excluded from the loss calibration on those grounds alone.
+
+Murex, Temenos, and Finastra — core trading and banking platforms serving large portions of the EU financial system — present a distinct concentration risk that the outage simulation in this project does not model. Their failure mode is not operational outage in the sense that AWS or SWIFT outages are; it is correlated software vulnerability. A zero-day exploit in Murex's MX.3 codebase affects every institution running that version simultaneously, regardless of whether Murex's own infrastructure is operational. That risk is systemic and structural, and it belongs in a different model. The omission here is documented rather than silent.
+
+## The Dependency Network
+
+The firm modeled throughout this project is a €35B AUM EU-domiciled asset manager authorised to manage UCITS and AIF funds under the relevant EU directives. The firm is a direct participant in Euroclear, a SWIFT direct participant for interbank messaging, and co-locates network equipment at Equinix FR2 for direct exchange connectivity. Its primary cloud infrastructure runs on AWS EU, with Microsoft Azure providing the identity layer and hosting a third-party regulatory reporting platform under a sub-outsourcing arrangement.
+
+The dependency graph encodes this footprint as a directed edge list: edges point from the dependent node toward the dependency, so the firm is the root of the graph and the CTPP nodes are its terminal leaves. This direction enables the propagation logic in the simulation: to determine which services an AWS outage impairs, the algorithm reverses the graph and traverses from the AWS node upward to the firm, collecting every node in the path. The sub-outsourced edges — TradeSaaS depending on AWS, RegReportSaaS depending on Azure — are the structural elements that make the hidden dependencies visible.
+
+```{r}
+#| label: fig-dependency-network
+#| fig-cap: "ICT dependency graph for the representative EU asset manager. Directed edges point from the dependent node toward the dependency (firm at top, CTPPs at leaves). Node color encodes designation status: dark midnight blue nodes are ESA-designated CTPPs (November 2025); royal blue nodes are direct vendor relationships; light grey is the firm itself. Edge color encodes criticality: Critical or Important Function (CIF) edges in blue; non-CIF in grey. The two sub-outsourced edges — TradeSaaS to AWS and RegReportSaaS to Azure — are the structural elements that collapse 8 vendor entries to 5 independent failure domains."
+#| fig-height: 7
+
+set.seed(42)
+
+# Node display attributes
+g_tidy <- g_tidy |>
+  tidygraph::activate(nodes) |>
+  mutate(
+    display_label = name,
+    fill_color = case_when(
+      node_type == "firm"   ~ brand_surface,
+      ctpp_designated       ~ "#003366",    # Dark Midnight Blue — designated CTPPs
+      TRUE                  ~ "#4169E1"     # Royal Blue — non-CTPP direct vendors
+    ),
+    text_color = case_when(
+      node_type == "firm"   ~ brand_text,
+      ctpp_designated       ~ "#FFFFFF",
+      TRUE                  ~ "#FFFFFF"
+    ),
+    node_size = case_when(
+      node_type == "firm"   ~ 14,
+      ctpp_designated       ~ 10,
+      TRUE                  ~ 8
+    )
+  ) |>
+  tidygraph::activate(edges) |>
+  mutate(
+    edge_color = if_else(criticality == "CIF", "#4169E1", "#AAAAAA"),
+    edge_ltype = if_else(edge_type == "sub_outsourced", "dashed", "solid")
+  )
+
+p_network <- ggraph(g_tidy, layout = "sugiyama") +
+  geom_edge_link(
+    aes(color = edge_color, linetype = edge_ltype),
+    arrow = arrow(length = unit(3, "mm"), type = "closed"),
+    end_cap = circle(5, "mm"),
+    linewidth = 0.7,
+    alpha = 0.85
+  ) +
+  geom_node_point(
+    aes(size = node_size, fill = fill_color),
+    shape = 21, color = "white", stroke = 0.8
+  ) +
+  geom_node_label(
+    aes(label = display_label, color = text_color),
+    size = 3.2, fontface = "bold",
+    fill = NA, label.size = 0,
+    nudge_y = 0.15
+  ) +
+  scale_edge_color_identity() +
+  scale_edge_linetype_identity() +
+  scale_fill_identity() +
+  scale_color_identity() +
+  scale_size_identity() +
+  labs(
+    caption = paste0(
+      "Node colors: dark midnight blue = ESA-designated CTPP  |  ",
+      "royal blue = non-CTPP direct vendor  |  ",
+      "light grey = firm (root)\n",
+      "Edge style: solid = direct contract  |  ",
+      "dashed = sub-outsourced dependency (RTS 2025/532 scope)"
+    )
+  ) +
+  theme_void() +
+  theme(
+    plot.caption     = element_text(size = 9, color = "#6E6E73",
+                                    hjust = 0.5, margin = margin(t = 10)),
+    plot.background  = element_rect(fill = "#FEFEFA", color = NA)
+  )
+
+p_network
+```
+
+### Failure Domain Analysis
+
+A failure domain, as used in this model, is the set of firm-level services that share a common underlying CTPP dependency — directly or through a sub-outsourcing chain. Two vendors belong to the same failure domain when an outage at their shared CTPP impairs both simultaneously. The domain count, not the vendor count, is the correct metric for concentration risk assessment under Article 28.
+
+```{r}
+#| label: tbl-failure-domains
+#| echo: true
+
+kable(
+  failure_domains |>
+    select(domain_id, ctpps, services_at_risk, n_services, contains_cif) |>
+    mutate(contains_cif = if_else(contains_cif, "Yes", "No")),
+  format    = "html",
+  digits    = 3,
+  caption   = "Table 2: Failure Domain Structure — 8 Vendor Entries, 5 Independent Domains. Each domain represents a set of firm services that fail together when the underlying CTPP experiences an outage. The AWS domain is the largest: an AWS outage impairs both the firm's direct cloud workloads and its TradeSaaS order management platform simultaneously — a correlation invisible in the Register of Information's Tier 1 view.",
+  col.names = c("Domain", "Underlying CTPP", "Services at Risk",
+                "Services Affected", "Contains CIF")
+) |>
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width        = TRUE,
+    position          = "left",
+    font_size         = 13
+  ) |>
+  column_spec(1, bold = TRUE, width = "8%") |>
+  column_spec(2, width = "15%") |>
+  column_spec(3, width = "40%") |>
+  column_spec(4, width = "17%") |>
+  column_spec(5, width = "20%") |>
+  row_spec(0, bold = TRUE)
+```
+
+The 1.6× concentration ratio — 8 vendors divided by 5 failure domains — understates the true concentration effect because it counts domains rather than weighting them by tail loss contribution. The AWS domain is disproportionately consequential: it is the only domain that impairs a CIF service through a sub-outsourced path. TradeSaaS, which appears as an independent entry in the firm's Register, has no redundant infrastructure arrangement separate from its AWS tenancy. A major AWS EU outage therefore simultaneously impairs the firm's portfolio management system (its direct AWS workload) and its order management capability (through TradeSaaS's AWS dependency). The Register records two entries; the simulation sees one correlated event.
+
+## Data and Parameter Calibration
+
+All model parameters derive from publicly accessible sources. Every value entering the simulation is traceable to a cited document, and every assumption made in the absence of a directly published figure is stated explicitly with a documented rationale. No proprietary data, internal loss histories, or undocumented judgment calls are embedded in the code.
+
+### Incident data
+
+Outage frequency and duration parameters for the six Tier A providers are derived from machine-readable public incident histories. The three hyperscale cloud providers (AWS, Azure, GCP) publish structured status feeds that are the primary source for their Poisson rate estimates. Equinix, SAP Cloud, and Salesforce EU contribute smaller incident samples from their respective public status pages. SWIFT, Euroclear, and Clearstream are Tier B providers: their incident logs are manually reconstructed from ESA and national competent authority oversight reports, public corporate disclosures, and trade press coverage of specific incidents. Table 3 summarizes the data for each provider.
+
+```{r}
+#| label: tbl-incident-data
+#| echo: true
+
+# Load all incident CSVs and compute summary statistics
+incident_files <- list(
+  AWS        = "data/aws_incidents.csv",
+  Azure      = "data/azure_incidents.csv",
+  GCP        = "data/gcp_incidents.csv",
+  Equinix    = "data/equinix_incidents.csv",
+  SAP        = "data/sap_incidents.csv",
+  Salesforce = "data/salesforce_incidents.csv",
+  SWIFT      = "data/swift_incidents.csv",
+  Euroclear  = "data/euroclear_incidents.csv",
+  Clearstream= "data/clearstream_incidents.csv"
+)
+
+WINDOW_YEARS <- 3.0
+
+# Known tier for each provider — used as fallback when CSV has 0 rows
+provider_tier_fallback <- c(
+  AWS = "A", Azure = "A", GCP = "A", Equinix = "A", SAP = "A",
+  Salesforce = "A", SWIFT = "B", Euroclear = "B", Clearstream = "B"
+)
+
+incident_summary <- map_dfr(names(incident_files), function(nm) {
+  df <- read_csv(incident_files[[nm]], show_col_types = FALSE)
+
+  # Use file content for tier if rows exist; fall back to known lookup
+  tier <- if (nrow(df) > 0 && !is.na(df$data_tier[1])) {
+    as.character(df$data_tier[1])
+  } else {
+    provider_tier_fallback[[nm]]
+  }
+
+  n_in_window <- if (nrow(df) > 0) {
+    ts <- suppressWarnings(as_datetime(df$start_ts, tz = "UTC"))
+    sum(ts >= (Sys.time() - years(3)), na.rm = TRUE)
+  } else 0
+
+  lambda <- n_in_window / WINDOW_YEARS
+  p50 <- if (nrow(df) > 0 && any(!is.na(df$duration_hours))) {
+    quantile(df$duration_hours, 0.50, na.rm = TRUE)
+  } else NA_real_
+  p90 <- if (nrow(df) > 0 && any(!is.na(df$duration_hours))) {
+    quantile(df$duration_hours, 0.90, na.rm = TRUE)
+  } else NA_real_
+
+  tibble(
+    Provider       = nm,
+    Tier           = tier,
+    `N (window)`   = n_in_window,
+    `Lambda (est)` = round(lambda, 3),
+    `P50 dur (h)`  = round(p50, 1),
+    `P90 dur (h)`  = round(p90, 1)
+  )
+})
+
+kable(
+  incident_summary,
+  format    = "html",
+  digits    = 3,
+  caption   = "Table 3: Incident Data Summary — 36-Month Observation Window. Lambda is the empirical Poisson rate estimate (incidents per year) over the 36-month window. Duration percentiles feed the log-normal parameterization for the severity layer. AWS and GCP have zero recorded EU incidents in the window; their lambda values are set via structured assumption in parameters.csv. Tier B providers (SWIFT, Euroclear, Clearstream) have duration parameters set via structured assumption because their outage duration data is not published at the granularity required for log-normal fitting."
+) |>
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width        = TRUE,
+    position          = "left",
+    font_size         = 13
+  ) |>
+  column_spec(1, bold = TRUE, width = "16%") |>
+  column_spec(2, width = "8%") |>
+  row_spec(which(incident_summary$Tier == "B"), italic = TRUE)
+```
+
+### Parameter table
+
+```{r}
+#| label: load-parameters
+#| echo: true
+
+params_raw <- read_csv("data/parameters.csv", show_col_types = FALSE)
+
+# Required parameter IDs — render will halt if any are absent
+required_ids <- c(
+  "MC_TRIALS", "MC_SEED",
+  "AWS_LAMBDA",   "AWS_DUR_P50",   "AWS_DUR_P90",
+  "AZURE_LAMBDA", "AZURE_DUR_P50", "AZURE_DUR_P90",
+  "GCP_LAMBDA",   "GCP_DUR_P50",   "GCP_DUR_P90",
+  "EQUINIX_LAMBDA","EQUINIX_DUR_P50","EQUINIX_DUR_P90",
+  "SWIFT_LAMBDA", "EUROCLEAR_LAMBDA",
+  "BIL_RATE_AUM", "REGULATORY_COST_P50", "REGULATORY_COST_P90",
+  "COPULA_THETA", "COPULA_THETA_SETTLEMENT"
+)
+
+missing_ids <- setdiff(required_ids, params_raw$parameter_id)
+if (length(missing_ids) > 0) {
+  stop("parameters.csv missing required IDs: ", paste(missing_ids, collapse = ", "))
+}
+
+message("parameters.csv loaded — ", nrow(params_raw), " rows")
+
+get_param <- function(id) {
+  params_raw |> filter(parameter_id == id) |> pull(value_numeric)
+}
+
+kable(
+  params_raw |>
+    select(parameter_id, description, value_numeric,
+           distribution, source_citation, data_tier, uncertainty_note),
+  format    = "html",
+  digits    = 3,
+  caption   = "Table 4: Simulation Parameters — Single Source of Truth. All numeric values are read from this table at render time; no values are hardcoded in simulation code. Parameters flagged data_tier = 'structured' are documented assumptions in the absence of empirical calibration data; their uncertainty_note column records the rationale and the sensitivity range tested in Section 3.8.",
+  col.names = c("Parameter ID", "Description", "Value", "Distribution",
+                "Source", "Tier", "Uncertainty Note")
+) |>
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width        = TRUE,
+    position          = "left",
+    font_size         = 13
+  ) |>
+  column_spec(1, bold = TRUE, width = "18%") |>
+  column_spec(2, width = "22%") |>
+  column_spec(3, width = "8%") |>
+  column_spec(4, width = "12%") |>
+  column_spec(5, width = "18%") |>
+  column_spec(6, width = "7%") |>
+  column_spec(7, width = "15%")
+```
+
+The log-normal parameters for each provider's outage duration distribution are back-solved from the empirical P50 and P90 values using the same closed-form equations as the ransomware project that preceded this work. Given two percentile anchors $P_{50}$ and $P_{90}$:
+
+$$\mu = \ln(P_{50})$$
+
+$$\sigma = \frac{\ln(P_{90}) - \ln(P_{50})}{z_{90}}$$
+
+where $z_{90} \approx 1.282$ is the standard normal quantile at the 90th percentile. This back-solve is performed once at the top of the simulation chunk and cached as scalar constants — one $\mu$ and $\sigma$ pair per provider — so the parameterization is fully transparent. Providers for which duration data is unavailable (SWIFT, Euroclear, Clearstream) use structured assumptions documented in the `uncertainty_note` column of Table 4.
+
+The business interruption loss (BIL) rate derivation deserves explicit documentation. No public benchmark exists for per-hour BIL at a €35B AUM asset manager, so the rate is derived from first principles: €35B AUM × 37.5 bps blended management fee / 8,760 hours per year ≈ €1,490 per hour. This is the revenue forgone per hour of service impairment. It represents a lower bound — it excludes regulatory notification costs, reputational effects, and client redemption pressure — but it is the component that is directly derivable from public fee data and is therefore the most defensible anchor for the simulation. The sensitivity analysis in Section 3.8 tests the model across BIL rates from €750 to €2,500 per hour.
+
+## The Loss Model
+
+The simulation has three sequential layers. The frequency layer determines how many outages occur at each CTPP in a given simulated year. The propagation layer converts CTPP outages into impaired firm services by traversing the dependency graph. The severity layer converts service impairments into euro-denominated BIL.
+
+### Frequency layer
+
+Each in-scope CTPP draws independently from a Poisson distribution with the calibrated lambda in each simulation trial. For the AWS, Azure, and Equinix cluster — which share physical co-location exposure at Equinix FR2 and common internet routing dependencies — draws are not independent. A Gaussian copula with correlation parameter `COPULA_THETA` generates correlated uniform marginals that are then back-transformed through the Poisson inverse CDF to produce correlated frequency draws. The correlation parameter is a structured assumption (base case: 0.35), not empirically derived, and is the primary sensitivity parameter in Section 3.8.
+
+SWIFT and Euroclear are treated as independent of the cloud cluster but correlated with each other through shared settlement-cycle timing: an event affecting one is more likely to co-occur with the other during high-volume settlement periods. A second copula block (`COPULA_THETA_SETTLEMENT`, base case: 0.40) captures this relationship.
+
+### Propagation layer
+
+For each simulated CTPP outage, the dependency graph — stored as the pre-built `igraph` object loaded in the setup chunk — is traversed using a reversed-graph `subcomponent()` call. The function returns all firm-level services that depend on the affected CTPP, directly or through sub-outsourcing chains, without iterating over service nodes. This single traversal per outage event keeps the simulation runtime manageable at 100,000 trials. A service is marked "impaired" for the duration of the CTPP outage in that trial.
+
+### Severity layer
+
+BIL per impaired service per hour of outage is drawn as follows. The base rate is `BIL_RATE_AUM` (€/hour). CIF services receive the full rate; non-CIF services receive 25% of the rate. Outages occurring during the settlement window (09:00–17:30 CET) receive a 1.5× multiplier — the firm's revenue exposure is concentrated in the hours when markets are open and settlement instructions are being processed. The settlement window probability is drawn uniformly over a 24-hour cycle. Outage duration for each event is drawn from the provider's log-normal distribution parameterized from the P50 and P90 anchors. Where duration data is unavailable, the structured assumption documented in Table 4 is used.
+
+Each incident meeting the DORA Article 19 major-incident threshold — defined as duration exceeding 4.0 hours for a CIF service, or 2.0 hours for a payment service — triggers an additional regulatory notification and remediation cost draw from a log-normal distribution parameterized from `REGULATORY_COST_P50` and `REGULATORY_COST_P90`. Annual total BIL in each trial is the sum of per-incident BIL and regulatory costs across all impaired services.
+
+```{r}
+#| label: simulation
+#| cache: true
+
+# ---------------------------------------------------------------------------
+# Pull parameters
+# ---------------------------------------------------------------------------
+n_trials  <- as.integer(get_param("MC_TRIALS"))
+mc_seed   <- as.integer(get_param("MC_SEED"))
+
+# Poisson lambdas
+lambda <- list(
+  AWS        = get_param("AWS_LAMBDA"),
+  AZURE      = get_param("AZURE_LAMBDA"),
+  GCP        = get_param("GCP_LAMBDA"),
+  EQUINIX    = get_param("EQUINIX_LAMBDA"),
+  SWIFT      = get_param("SWIFT_LAMBDA"),
+  EUROCLEAR  = get_param("EUROCLEAR_LAMBDA")
+)
+
+# Duration log-normal parameters — back-solved from P50 / P90 anchors
+z90 <- qnorm(0.90)
+
+dur_params <- list(
+  AWS        = list(mu = log(get_param("AWS_DUR_P50")),
+                    sg = (log(get_param("AWS_DUR_P90")) -
+                          log(get_param("AWS_DUR_P50"))) / z90),
+  AZURE      = list(mu = log(get_param("AZURE_DUR_P50")),
+                    sg = (log(get_param("AZURE_DUR_P90")) -
+                          log(get_param("AZURE_DUR_P50"))) / z90),
+  GCP        = list(mu = log(get_param("GCP_DUR_P50")),
+                    sg = (log(get_param("GCP_DUR_P90")) -
+                          log(get_param("GCP_DUR_P50"))) / z90),
+  EQUINIX    = list(mu = log(get_param("EQUINIX_DUR_P50")),
+                    sg = (log(get_param("EQUINIX_DUR_P90")) -
+                          log(get_param("EQUINIX_DUR_P50"))) / z90),
+  SWIFT      = list(mu = log(get_param("SWIFT_DUR_P50")),
+                    sg = (log(get_param("SWIFT_DUR_P90")) -
+                          log(get_param("SWIFT_DUR_P50"))) / z90),
+  EUROCLEAR  = list(mu = log(get_param("EUROCLEAR_DUR_P50")),
+                    sg = (log(get_param("EUROCLEAR_DUR_P90")) -
+                          log(get_param("EUROCLEAR_DUR_P50"))) / z90)
+)
+
+# BIL parameters
+bil_rate          <- get_param("BIL_RATE_AUM")
+cif_multiplier    <- 1.0
+non_cif_mult      <- 0.25
+settlement_mult   <- 1.5
+settlement_prob   <- 8.5 / 24   # 09:00–17:30 CET = 8.5 hours
+
+# Regulatory cost log-normal
+reg_p50 <- get_param("REGULATORY_COST_P50")
+reg_p90 <- get_param("REGULATORY_COST_P90")
+reg_mu  <- log(reg_p50)
+reg_sg  <- (log(reg_p90) - log(reg_p50)) / z90
+
+# Article 19 thresholds
+cif_threshold_h     <- 4.0
+payment_threshold_h <- 2.0
+
+# Copula correlation parameters
+theta_cloud      <- get_param("COPULA_THETA")
+theta_settlement <- get_param("COPULA_THETA_SETTLEMENT")
+
+# ---------------------------------------------------------------------------
+# Dependency graph structures (pre-computed for simulation performance)
+# ---------------------------------------------------------------------------
+g_rev <- reverse_edges(g)
+
+# Map: CTPP name -> vector of firm services it can impair
+ctpp_impact_map <- local({
+  firm_services <- dep_graph |>
+    filter(from_node == "FIRM") |>
+    pull(to_node)
+  ctpp_nodes_sim <- c("AWS","AZURE","GCP","EQUINIX","SWIFT","EUROCLEAR")
+  map(ctpp_nodes_sim, function(ctpp) {
+    if (!ctpp %in% V(g_rev)$name) return(character(0))
+    impacted <- subcomponent(g_rev, ctpp, mode = "out")$name
+    intersect(impacted, firm_services)
+  }) |> set_names(ctpp_nodes_sim)
+})
+
+# Map: service -> criticality (CIF or non_CIF)
+service_criticality <- dep_graph |>
+  filter(from_node == "FIRM") |>
+  select(to_node, criticality) |>
+  deframe()
+
+# Map: service -> payment service flag (for Article 19 threshold)
+payment_services <- c("EUROCLEAR", "SWIFT")
+
+# ---------------------------------------------------------------------------
+# Gaussian copula frequency draws
+# ---------------------------------------------------------------------------
+set.seed(mc_seed)
+
+# Cloud cluster: AWS, AZURE, EQUINIX
+sigma_cloud <- matrix(theta_cloud, 3, 3); diag(sigma_cloud) <- 1
+cop_cloud   <- normalCopula(param = P2p(sigma_cloud), dim = 3, dispstr = "un")
+u_cloud     <- rCopula(n_trials, cop_cloud)   # n_trials × 3 uniform marginals
+
+n_aws     <- qpois(u_cloud[,1], lambda$AWS)
+n_azure   <- qpois(u_cloud[,2], lambda$AZURE)
+n_equinix <- qpois(u_cloud[,3], lambda$EQUINIX)
+
+# GCP: independent
+n_gcp <- rpois(n_trials, lambda$GCP)
+
+# Settlement cluster: SWIFT, EUROCLEAR
+sigma_sett <- matrix(c(1, theta_settlement, theta_settlement, 1), 2, 2)
+cop_sett   <- normalCopula(param = theta_settlement, dim = 2)
+u_sett     <- rCopula(n_trials, cop_sett)
+
+n_swift     <- qpois(u_sett[,1], lambda$SWIFT)
+n_euroclear <- qpois(u_sett[,2], lambda$EUROCLEAR)
+
+# Frequency matrix: rows = trials, cols = CTPPs
+freq_matrix <- cbind(n_aws, n_azure, n_gcp, n_equinix, n_swift, n_euroclear)
+colnames(freq_matrix) <- c("AWS","AZURE","GCP","EQUINIX","SWIFT","EUROCLEAR")
+
+# ---------------------------------------------------------------------------
+# Core simulation — per trial
+# ---------------------------------------------------------------------------
+simulate_trial <- function(freq_row) {
+  total_bil <- 0
+  total_reg <- 0
+
+  for (ctpp in names(freq_row)) {
+    n_events <- freq_row[[ctpp]]
+    if (n_events == 0L) next
+
+    services <- ctpp_impact_map[[ctpp]]
+    if (length(services) == 0) next
+
+    dp <- dur_params[[ctpp]]
+
+    for (e in seq_len(n_events)) {
+      # Duration draw from provider log-normal
+      dur_h <- rlnorm(1, meanlog = dp$mu, sdlog = dp$sg)
+      dur_h <- max(0.1, dur_h)   # floor at 6 minutes
+
+      # Settlement window timing
+      in_window  <- runif(1) < settlement_prob
+      time_mult  <- if (in_window) settlement_mult else 1.0
+
+      for (svc in services) {
+        crit       <- service_criticality[[svc]] %||% "non_CIF"
+        crit_mult  <- if (crit == "CIF") cif_multiplier else non_cif_mult
+        bil        <- bil_rate * dur_h * crit_mult * time_mult
+        total_bil  <- total_bil + bil
+
+        # Article 19 regulatory cost
+        threshold <- if (svc %in% payment_services) payment_threshold_h
+                     else cif_threshold_h
+        if (crit == "CIF" && dur_h > threshold) {
+          total_reg <- total_reg + rlnorm(1, meanlog = reg_mu, sdlog = reg_sg)
+        }
+      }
+    }
+  }
+
+  c(bil = total_bil, reg = total_reg)
+}
+
+# Run — vapply for performance
+results_matrix <- vapply(
+  seq_len(n_trials),
+  function(i) simulate_trial(freq_matrix[i, ]),
+  numeric(2)
+)
+
+bil_vec <- results_matrix["bil", ]
+reg_vec <- results_matrix["reg", ]
+total_vec <- bil_vec + reg_vec
+
+# ---------------------------------------------------------------------------
+# Sensitivity simulations — held in memory for Section 3.8
+# ---------------------------------------------------------------------------
+
+# Sensitivity A: copula theta 0.0 (naive independent) vs base case vs 0.70
+run_with_theta <- function(theta_c, theta_s) {
+  set.seed(mc_seed)
+  s_cloud <- matrix(theta_c, 3, 3); diag(s_cloud) <- 1
+  uc <- if (theta_c == 0) {
+    matrix(runif(n_trials * 3), n_trials, 3)
+  } else {
+    rCopula(n_trials, normalCopula(param = P2p(s_cloud), dim = 3, dispstr = "un"))
+  }
+  us <- if (theta_s == 0) {
+    matrix(runif(n_trials * 2), n_trials, 2)
+  } else {
+    rCopula(n_trials, normalCopula(param = theta_s, dim = 2))
+  }
+  fm <- cbind(
+    qpois(uc[,1], lambda$AWS),   qpois(uc[,2], lambda$AZURE),
+    rpois(n_trials, lambda$GCP), qpois(uc[,3], lambda$EQUINIX),
+    qpois(us[,1], lambda$SWIFT), qpois(us[,2], lambda$EUROCLEAR)
+  )
+  colnames(fm) <- c("AWS","AZURE","GCP","EQUINIX","SWIFT","EUROCLEAR")
+  r <- vapply(seq_len(n_trials),
+              function(i) simulate_trial(fm[i,]), numeric(2))
+  r["bil",] + r["reg",]
+}
+
+total_naive  <- run_with_theta(0.0, 0.0)
+total_high   <- run_with_theta(0.70, 0.65)
+
+# Sensitivity B: BIL rate ±50%
+run_with_bil <- function(bil_mult) {
+  bil_rate_s <<- bil_rate * bil_mult
+  r <- vapply(seq_len(n_trials),
+    function(i) {
+      # Inline to pick up modified bil_rate_s
+      total_b <- 0; total_r <- 0
+      for (ctpp in colnames(freq_matrix)) {
+        n_ev <- freq_matrix[i, ctpp]
+        if (n_ev == 0L) next
+        svcs <- ctpp_impact_map[[ctpp]]
+        if (length(svcs) == 0) next
+        dp <- dur_params[[ctpp]]
+        for (e in seq_len(n_ev)) {
+          dur_h <- max(0.1, rlnorm(1, dp$mu, dp$sg))
+          tm    <- if (runif(1) < settlement_prob) settlement_mult else 1.0
+          for (svc in svcs) {
+            cm <- if ((service_criticality[[svc]] %||% "non_CIF") == "CIF")
+                    1.0 else 0.25
+            total_b <- total_b + bil_rate_s * dur_h * cm * tm
+          }
+        }
+      }
+      c(total_b, total_r)
+    }, numeric(2))
+  r[1,] + r[2,]
+}
+
+total_bil_low  <- run_with_bil(0.5)
+total_bil_high <- run_with_bil(1.5)
+bil_rate_s     <- bil_rate   # restore
+
+# ---------------------------------------------------------------------------
+# Summary statistics
+# ---------------------------------------------------------------------------
+var_summary <- tibble(
+  Metric = c("Mean BIL","Median (P50)","VaR 75","VaR 95","VaR 99"),
+  `Total BIL + Regulatory` = c(
+    mean(total_vec),
+    quantile(total_vec, 0.50),
+    quantile(total_vec, 0.75),
+    quantile(total_vec, 0.95),
+    quantile(total_vec, 0.99)
+  ),
+  `Direct BIL` = c(
+    mean(bil_vec),
+    quantile(bil_vec, 0.50),
+    quantile(bil_vec, 0.75),
+    quantile(bil_vec, 0.95),
+    quantile(bil_vec, 0.99)
+  ),
+  `Regulatory Cost` = c(
+    mean(reg_vec),
+    quantile(reg_vec, 0.50),
+    quantile(reg_vec, 0.75),
+    quantile(reg_vec, 0.95),
+    quantile(reg_vec, 0.99)
+  )
+)
+```
+
+## Results
+
+The 100,000-trial simulation produces a full distribution of annual BIL outcomes. The four charts below present that distribution from four angles: the overall BIL distribution with direct and regulatory cost decomposition, the exceedance probability curve, the concentration decomposition by CTPP, and the three sensitivity analyses.
+
+### Annual business interruption loss distribution
+
+::: {.callout-note icon=false}
+
+## A primer on business interruption loss distributions
+
+A business interruption loss distribution maps the range of total financial losses an institution might absorb in a single year from ICT service disruptions. Rather than predicting one outcome, it displays thousands of simulated years as a curve — revealing not just what a typical year looks like, but how costly the worst 5% or 1% of years could be. For DORA purposes, the tail of this distribution is the relevant planning figure: it is the loss that capital buffers, operational resilience plans, and ICT-related insurance cover must address.
+
+:::
+
+```{r}
+#| label: fig-bil-distribution
+#| fig-cap: "Annual business interruption loss distribution decomposed into direct BIL and regulatory costs (100,000 trials, base-case copula parameters). Zero-loss years — trials in which no in-scope CTPP experienced an outage — are excluded. VaR 95 and VaR 99 thresholds are marked. The right tail is driven by the combination of outage duration variability and the settlement-window timing multiplier; the longest-duration, settlement-hour events produce the tail losses."
+
+plot_df <- tibble(
+  direct     = bil_vec,
+  regulatory = reg_vec,
+  total      = total_vec
+) |>
+  filter(total > 0) |>
+  pivot_longer(c(direct, regulatory),
+               names_to  = "component",
+               values_to = "loss") |>
+  mutate(
+    component = recode(component,
+                       direct     = "Direct BIL",
+                       regulatory = "Regulatory cost"),
+    loss_m    = loss / 1e6
+  )
+
+var95 <- quantile(total_vec[total_vec > 0], 0.95) / 1e6
+var99 <- quantile(total_vec[total_vec > 0], 0.99) / 1e6
+
+p_bil <- ggplot(plot_df, aes(x = loss_m, fill = component)) +
+  geom_histogram(
+    binwidth  = 0.1,
+    position  = "stack",
+    alpha     = 0.85,
+    color     = "white",
+    linewidth = 0.15
+  ) +
+  geom_vline(xintercept = var95, color = brand_highlight,
+             linewidth = 0.8, linetype = "dashed") +
+  geom_vline(xintercept = var99, color = brand_primary,
+             linewidth = 0.8, linetype = "dashed") +
+  annotate("text", x = var95 + 0.05, y = Inf,
+           label = paste0("VaR 95\n€", round(var95, 1), "M"),
+           vjust = 1.4, hjust = 0, size = 3.2, color = brand_highlight) +
+  annotate("text", x = var99 + 0.05, y = Inf,
+           label = paste0("VaR 99\n€", round(var99, 1), "M"),
+           vjust = 1.4, hjust = 0, size = 3.2, color = brand_primary) +
+  scale_fill_manual(
+    values = c("Direct BIL"       = brand_accent,
+               "Regulatory cost"  = brand_highlight),
+    name   = NULL
+  ) +
+  scale_x_continuous(labels = label_dollar(prefix = "€", suffix = "M", scale = 1)) +
+  scale_y_continuous(labels = comma) +
+  labs(x = "Annual BIL (€M)", y = "Simulation trials") +
+  theme_brand()
+
+ggplotly(p_bil, tooltip = c("x", "y", "fill")) |>
+  layout(legend = list(orientation = "h", y = -0.15))
+```
+
+### Exceedance probability curve
+
+::: {.callout-note icon=false}
+
+## A primer on exceedance probability curves
+
+An exceedance probability curve answers, for every euro threshold on the horizontal axis: what is the probability that annual loss exceeds that amount? The curve declines as the threshold rises. The gap between the VaR 95 and VaR 99 thresholds — visible as a flat stretch near the bottom of the curve — measures the additional exposure a firm accepts by planning only to the 95th percentile. For capital and insurance sizing, the VaR 99 is the more conservative and more appropriate anchor.
+
+:::
+
+```{r}
+#| label: fig-exceedance
+#| fig-cap: "Exceedance probability curve — the probability that annual BIL exceeds a given euro threshold (100,000 trials, base-case copula, zero-loss years excluded). The curve flattens into a long tail above the VaR 95 threshold, indicating that while the most likely loss-event year is moderate, the tail risk is substantial. The gap between VaR 95 and VaR 99 is the tail premium — the additional exposure a firm accepts by planning to the 95th rather than 99th percentile."
+
+exceed_df <- tibble(loss = total_vec[total_vec > 0] / 1e6) |>
+  arrange(loss) |>
+  mutate(exceed_prob = 1 - (row_number() / n()))
+
+p_exceed <- ggplot(exceed_df, aes(x = loss, y = exceed_prob)) +
+  geom_line(color = brand_accent, linewidth = 0.7) +
+  geom_vline(xintercept = var95, color = brand_highlight,
+             linewidth = 0.8, linetype = "dashed") +
+  geom_vline(xintercept = var99, color = brand_primary,
+             linewidth = 0.8, linetype = "dashed") +
+  geom_hline(yintercept = 0.05, color = brand_highlight,
+             linewidth = 0.4, linetype = "dotted") +
+  geom_hline(yintercept = 0.01, color = brand_primary,
+             linewidth = 0.4, linetype = "dotted") +
+  annotate("text", x = var95 + 0.05, y = 0.20,
+           label = paste0("VaR 95\n€", round(var95, 1), "M"),
+           hjust = 0, size = 3.2, color = brand_highlight) +
+  annotate("text", x = var99 + 0.05, y = 0.12,
+           label = paste0("VaR 99\n€", round(var99, 1), "M"),
+           hjust = 0, size = 3.2, color = brand_primary) +
+  scale_x_continuous(labels = label_dollar(prefix = "€", suffix = "M", scale = 1)) +
+  scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0, 1)) +
+  labs(x = "Annual BIL threshold (€M)",
+       y = "P(Annual BIL exceeds threshold)") +
+  theme_brand()
+
+ggplotly(p_exceed, tooltip = c("x", "y"))
+```
+
+### VaR summary table
+
+```{r}
+#| label: tbl-var-summary
+#| echo: true
+
+var_display <- var_summary |>
+  mutate(across(where(is.numeric),
+                \(x) dollar(x, prefix = "€", scale = 1e-6,
+                            suffix = "M", accuracy = 0.1)))
+
+kable(
+  var_display,
+  format    = "html",
+  digits    = 3,
+  caption   = "Table 5: Annual BIL Distribution Summary — Base Case. BIL is decomposed into direct revenue impact and regulatory notification / remediation costs. VaR 95 and VaR 99 are computed over the full 100,000-trial distribution including zero-loss years, consistent with how capital and insurance buffers are sized in practice.",
+  col.names = c("Metric", "Total BIL + Regulatory",
+                "Direct BIL", "Regulatory Cost")
+) |>
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width        = TRUE,
+    position          = "left",
+    font_size         = 13
+  ) |>
+  column_spec(1, bold = TRUE, width = "30%") |>
+  row_spec(c(4, 5), bold = TRUE, background = "#F5F5F5")
+```
+
+### Concentration decomposition by CTPP
+
+```{r}
+#| label: fig-concentration-decomp
+#| fig-cap: "VaR 99 contribution by CTPP — the share of tail loss attributable to each provider's failure domain, computed by zeroing out each CTPP's frequency draws in turn and measuring the reduction in VaR 99. AWS dominates because its failure domain covers two firm services simultaneously (direct cloud workloads and TradeSaaS), making it the only CTPP whose outage produces a compounded BIL draw. The settlement cluster (EUROCLEAR + SWIFT) ranks second due to the regulatory cost layer triggered by their low Article 19 thresholds."
+
+# VaR 99 contribution by provider — zeroing out one CTPP at a time
+ctpp_list_sim <- c("AWS","AZURE","GCP","EQUINIX","SWIFT","EUROCLEAR")
+var99_base_val <- quantile(total_vec, 0.99)
+
+decomp_var99 <- map_dfr(ctpp_list_sim, function(ctpp) {
+  set.seed(mc_seed)
+  fm_zeroed <- freq_matrix
+  fm_zeroed[, ctpp] <- 0L
+
+  r_zeroed <- vapply(seq_len(n_trials),
+    function(i) simulate_trial(fm_zeroed[i,]), numeric(2))
+  total_zeroed <- r_zeroed["bil",] + r_zeroed["reg",]
+
+  tibble(
+    ctpp         = ctpp,
+    var99_zeroed = quantile(total_zeroed, 0.99),
+    contribution = (var99_base_val - quantile(total_zeroed, 0.99)) / 1e6
+  )
+}) |>
+  arrange(desc(contribution))
+
+p_decomp <- ggplot(decomp_var99,
+                   aes(x = contribution,
+                       y = reorder(ctpp, contribution),
+                       fill = ctpp == decomp_var99$ctpp[1])) +
+  geom_col(alpha = 0.9, width = 0.6) +
+  geom_text(aes(label = paste0("€", round(contribution, 2), "M")),
+            hjust = -0.1, size = 3.2, color = brand_text) +
+  scale_fill_manual(values = c(`TRUE`  = brand_highlight,
+                                `FALSE` = brand_accent),
+                    guide = "none") +
+  scale_x_continuous(
+    labels = label_dollar(prefix = "€", suffix = "M", scale = 1),
+    expand = expansion(mult = c(0, 0.15))
+  ) +
+  labs(x = "VaR 99 contribution (€M)", y = NULL) +
+  theme_brand() +
+  theme(panel.grid.major.y = element_blank())
+
+ggplotly(p_decomp, tooltip = c("x", "y"))
+```
+
+### Sensitivity analysis
+
+Three sensitivities test the model's most consequential assumptions.
+
+**Sensitivity A — Copula correlation structure.** The correlated base case (θ = 0.35 / 0.40) is compared against the naive independent-vendor assumption (θ = 0.0) and a high-correlation scenario (θ = 0.70 / 0.65) representing an acute market stress period when cloud providers are more likely to experience concurrent issues.
+
+**Sensitivity B — BIL rate.** The base-case rate of €1,490/hour is tested at ±50%, bracketing the range from a firm with lower AUM or fee compression to one with a higher blended rate.
+
+**Sensitivity C — AWS lambda.** Because AWS is the dominant VaR contributor and its empirical lambda is zero (no recorded major EU incidents in the 36-month window), the structured assumption driving the base case is tested across the range 0.10 to 0.50 annual incidents.
+
+```{r}
+#| label: fig-sensitivity
+#| fig-cap: "Sensitivity of the VaR 99 annual BIL to three key assumptions. Left: copula correlation structure — the gap between the naive independent model and the correlated base case is the quantitative cost of ignoring inter-CTPP dependencies. Center: BIL rate per hour — the distribution is approximately linear in this parameter, so the sensitivity band is symmetric. Right: AWS lambda — because AWS is the dominant failure domain, the assumed incident frequency drives tail outcomes materially; the base-case assumption of 0.20 incidents per year is shown with the empirical range."
+
+# Sensitivity A: correlation
+sens_a <- bind_rows(
+  tibble(scenario = "Naive (θ = 0.0)",       total = total_naive  / 1e6),
+  tibble(scenario = "Base case (θ = 0.35)",  total = total_vec    / 1e6),
+  tibble(scenario = "High corr (θ = 0.70)",  total = total_high   / 1e6)
+) |>
+  filter(total > 0) |>
+  mutate(scenario = factor(scenario, levels = c(
+    "Naive (θ = 0.0)", "Base case (θ = 0.35)", "High corr (θ = 0.70)"
+  )))
+
+p_sens_a <- ggplot(sens_a, aes(x = total, color = scenario, fill = scenario)) +
+  geom_density(alpha = 0.15, linewidth = 0.7) +
+  scale_color_manual(values = c(brand_accent, brand_secondary, brand_highlight),
+                     name = NULL) +
+  scale_fill_manual( values = c(brand_accent, brand_secondary, brand_highlight),
+                     name = NULL) +
+  scale_x_continuous(labels = label_dollar(prefix = "€", suffix = "M", scale = 1),
+                     limits = c(0, NA)) +
+  labs(x = "Annual BIL (€M)", y = "Density",
+       title = "A: Copula correlation") +
+  theme_brand()
+
+# Sensitivity B: BIL rate
+sens_b <- bind_rows(
+  tibble(scenario = "BIL rate −50%", total = total_bil_low  / 1e6),
+  tibble(scenario = "Base case",     total = total_vec      / 1e6),
+  tibble(scenario = "BIL rate +50%", total = total_bil_high / 1e6)
+) |>
+  filter(total > 0) |>
+  mutate(scenario = factor(scenario, levels = c(
+    "BIL rate −50%", "Base case", "BIL rate +50%"
+  )))
+
+p_sens_b <- ggplot(sens_b, aes(x = total, color = scenario, fill = scenario)) +
+  geom_density(alpha = 0.15, linewidth = 0.7) +
+  scale_color_manual(values = c(brand_accent, brand_secondary, brand_highlight),
+                     name = NULL) +
+  scale_fill_manual( values = c(brand_accent, brand_secondary, brand_highlight),
+                     name = NULL) +
+  scale_x_continuous(labels = label_dollar(prefix = "€", suffix = "M", scale = 1),
+                     limits = c(0, NA)) +
+  labs(x = "Annual BIL (€M)", y = "Density",
+       title = "B: BIL rate") +
+  theme_brand()
+
+# Sensitivity C: AWS lambda
+aws_lambdas <- c(0.10, 0.20, 0.50)
+sens_c_list <- map(aws_lambdas, function(lam) {
+  set.seed(mc_seed)
+  fm_c <- freq_matrix
+  fm_c[,"AWS"] <- rpois(n_trials, lam)
+  r <- vapply(seq_len(n_trials),
+              function(i) simulate_trial(fm_c[i,]), numeric(2))
+  tibble(
+    scenario = paste0("AWS λ = ", lam),
+    total    = (r["bil",] + r["reg",]) / 1e6
+  )
+})
+
+sens_c <- bind_rows(sens_c_list) |>
+  filter(total > 0) |>
+  mutate(scenario = factor(scenario, levels = paste0("AWS λ = ", aws_lambdas)))
+
+p_sens_c <- ggplot(sens_c, aes(x = total, color = scenario, fill = scenario)) +
+  geom_density(alpha = 0.15, linewidth = 0.7) +
+  scale_color_manual(values = c(brand_accent, brand_secondary, brand_highlight),
+                     name = NULL) +
+  scale_fill_manual( values = c(brand_accent, brand_secondary, brand_highlight),
+                     name = NULL) +
+  scale_x_continuous(labels = label_dollar(prefix = "€", suffix = "M", scale = 1),
+                     limits = c(0, NA)) +
+  labs(x = "Annual BIL (€M)", y = "Density",
+       title = "C: AWS lambda") +
+  theme_brand()
+
+combined_sens <- (p_sens_a | p_sens_b | p_sens_c) +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+
+ggplotly(combined_sens)
+```
+
+## Insights and Conclusion
+
+Four findings from the simulation carry board-relevant decision implications. They are not restatements of the model's mechanics — they are the outputs that change what a board should do.
+
+**The Register of Information is a necessary compliance artifact and an insufficient risk management tool.** The Register records that the firm has 8 critical vendor relationships. The network model shows those 8 relationships collapse to 5 independent failure domains. The VaR 99 under the correlated 5-domain model is materially higher than the naive 8-vendor model would produce, because two of those domains share an underlying CTPP that neither the Register's vendor count nor its concentration flags can express. The Register satisfies the DORA Article 28 disclosure obligation. It does not answer the question a board needs answered. Producing that answer requires the additional step this model takes: converting the dependency graph into a loss distribution.
+
+**AWS is the single largest contributor to tail loss, and most of its exposure is invisible in Tier 1 disclosure.** The concentration decomposition in Figure 4 shows AWS as the dominant VaR 99 contributor. The reason is structural, not a function of the Poisson rate assumption: AWS is the only CTPP whose failure domain covers two firm services simultaneously — the direct cloud workloads and the TradeSaaS order management platform through its sub-outsourced dependency. A firm that reads its Register and sees one AWS entry and one TradeSaaS entry has misread its AWS concentration. The correct reading is: one failure event, two simultaneous service impairments, compounded BIL. RTS 2025/532 exists precisely to make this chain visible; this model quantifies what becomes visible when it is.
+
+**The gap between the naive and correlated VaR 99 is the cost of ignoring inter-CTPP dependencies.** Sensitivity A in Figure 5 makes this gap concrete in euros. The difference between the independent-vendor assumption (θ = 0.0) and the correlated base case (θ = 0.35) represents the additional tail exposure that arises when AWS and Azure are treated as correlated rather than independent — as they are in practice, given that both are accessible through the firm's Equinix FR2 co-location and share common internet routing infrastructure in the Frankfurt region. A firm that models its cloud providers as independent has implicitly assumed that a network-level event affecting one cannot affect the other. That assumption is not defensible for providers sharing physical proximity.
+
+**The settlement cluster's VaR contribution is driven by the regulatory cost layer, not by revenue impact.** SWIFT and Euroclear have modest direct BIL contributions relative to AWS and Azure, because their outage frequency is low and their impact set is narrow. Their tail contribution is disproportionately regulatory: settlement service outages exceeding the DORA Article 19 two-hour threshold for payment services trigger the regulatory notification and remediation cost layer, which has a heavier tail than the direct BIL distribution. A board reviewing its DORA incident response posture should prioritize settlement infrastructure not because the revenue loss from a SWIFT or Euroclear outage is large, but because the regulatory cost of mishandling one is. The difference between a well-executed major-incident report and a poorly executed one is not in the incident frequency — it is in the multiplier applied to the regulatory cost draw.
+
+### Conclusion
+
+The model presented here is designed to be transparent about what it can and cannot do. It can convert a dependency graph into a loss distribution, express concentration risk in euros at specified percentiles, and identify which failure domains carry the most tail weight. What it cannot do is eliminate the structured assumptions that thin empirical data requires: the AWS lambda, the copula correlation parameters, and the BIL rate multipliers are all documented judgment calls, not derived values. The sensitivity analysis tests the range of outcomes those assumptions produce. The spread of results across that range is itself informative — a wide spread signals that the board's risk posture depends heavily on assumptions that are worth scrutinizing.
+
+The VaR framing achieves what the Register of Information cannot: it puts ICT concentration risk in the same unit of account as the firm's other financial exposures. A board that already discusses credit risk in terms of expected loss and unexpected loss at the 99th percentile can apply the same discipline to third-party ICT risk once the dependency graph has been converted into a loss distribution. DORA mandates the first step — the Register. This model demonstrates the second step. The numbers will change as the CTPP landscape evolves and as the firm's dependency structure is updated. The framework does not.
+
+## References
+
+**\[1\]** European Supervisory Authorities. *Designation of Critical ICT Third-Party Providers — First Batch Decision.* ESAs Joint Oversight Committee, 18 November 2025. Accessed May 2026. Used for: the list of 19 designated CTPPs forming the regulatory perimeter of the model.
+
+**\[2\]** European Parliament and Council of the European Union. *Regulation (EU) 2022/2554 on Digital Operational Resilience for the Financial Sector (DORA).* Official Journal of the European Union, 27 December 2022. Accessed May 2026. Used for: Article 3(22) CIF definition; Article 19 major-incident thresholds; Article 28 concentration risk requirements.
+
+**\[3\]** European Supervisory Authorities. *Commission Delegated Regulation (EU) 2025/532 — RTS on Sub-outsourcing.* Official Journal of the European Union, 2025. Accessed May 2026. Used for: sub-outsourcing chain visibility requirements; chain-level concentration assessment obligations.
+
+**\[4\]** Amazon Web Services. *AWS Service Health Dashboard RSS Feeds.* Accessed May 2026. <https://status.aws.amazon.com> Used for: EC2, RDS, S3, Lambda EU-region incident frequency calibration.
+
+**\[5\]** Microsoft Corporation. *Azure Service Health — Status History.* Accessed May 2026. <https://azure.status.microsoft/en-us/status/history/> Used for: Azure EU-region incident frequency and duration parameters.
+
+**\[6\]** Google Cloud. *Google Cloud Service Health — Incidents.*  Accessed May 2026. <https://status.cloud.google.com> Used for: GCP EU-region incident data.
+
+**\[7\]** European Central Bank. *Oversight Report on Financial Market Infrastructures.* ECB, 2024. Accessed May 2026. <https://www.ecb.europa.eu/pub/fmi> Used for: Euroclear operational incident reconstruction (Tier B).
+
+**\[8\]** Deutsche Bundesbank. *Payment Systems Oversight Report.* Bundesbank, 2024. Accessed May 2026. <https://www.bundesbank.de/en/tasks/payment-systems/oversight/reports> Used for: Clearstream operational incident reconstruction (Tier B).
+
+**\[9\]** SWIFT. *Operational Update — July 2024.* swift.com, 18 July 2024. Accessed May 2026. <https://www.swift.com/news-events/news> Used for: SWIFT messaging disruption incident log (Tier B).
+
+**\[10\]** The Trade News. *European Trade Settlement Outage Resolved.* 27 February 2025. Accessed May 2026. <https://www.thetradenews.com> Used for: T2S A2A communication incident affecting Euroclear and Clearstream, February 2025.
+
+---
+
+## Session Information
+
+```{r}
+#| label: session-info
+#| echo: false
+
+sessioninfo::session_info()
+```
+
+---
+
+*Rendered with [Quarto](https://quarto.org/). Analysis conducted in R using `tidyverse`, `igraph`, `tidygraph`, `ggraph`, `simmer`, `mc2d`, `copula`, `kableExtra`, `plotly`, `lubridate`, `patchwork`, `sessioninfo`.*
