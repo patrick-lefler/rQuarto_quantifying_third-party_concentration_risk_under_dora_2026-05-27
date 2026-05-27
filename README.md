@@ -7,7 +7,7 @@
 
 **Published:** 2026-05-27
 
-**Rendered:** 
+**Rendered:** https://patrick-lefler.github.io/rQuarto_quantifying_third-party_concentration_risk_under_dora_2026-05-27/
 
 ---
 
