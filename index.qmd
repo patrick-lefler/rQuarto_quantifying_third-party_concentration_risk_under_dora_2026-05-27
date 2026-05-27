@@ -14,8 +14,8 @@ abstract: |
   entries to a shared underlying provider.
 
   This project constructs a directed dependency graph for a representative
-  €35B AUM EU asset manager and shows that 8 vendor entries in the Register
-  collapse to 5 independent failure domains — a 1.6× concentration ratio the
+  €35B AUM EU asset manager and shows that eight vendor entries in the Register
+  collapse to five independent failure domains — a 1.6× concentration ratio the
   Register cannot express. A discrete-event simulation, calibrated to public
   incident histories of the ESAs' 19 designated Critical ICT Third-Party
   Providers (November 2025), produces an annualized business interruption
@@ -151,9 +151,9 @@ Third-party ICT concentration risk sits at the intersection of two problems that
 
 DORA (Digital Operational Resilience Act), which entered into force across the EU on 17 January 2025, imposes a direct obligation on financial entities to address both problems. DORA Article 28 requires assessment of concentration risk in ICT third-party arrangements. The European Supervisory Authorities' (ESAs) accompanying Register of Information framework — which requires entities to map their ICT service dependencies with full sub-outsourcing chain visibility — creates the data infrastructure the assessment requires. In November 2025, the Joint Oversight Committee (JOC) published the first official list of 19 designated Critical ICT Third-Party Providers (CTPPs), establishing the regulatory perimeter for mandatory oversight and the empirical anchor for any quantitative model of concentration risk.
 
-The Register of Information, however, is a disclosure artifact. It records what a firm's dependency graph looks like; it does not convert that structure into a loss estimate. The firm that files a Register showing 8 critical vendor relationships has not answered the question a board needs answered: if the worst 1% of years occurs, how much does this dependency structure cost?
+The Register of Information, however, is a disclosure artifact. It records what a firm's dependency graph looks like; it does not convert that structure into a loss estimate. The firm that files a Register showing eight critical vendor relationships has not answered the question a board needs answered: if the worst 1% of years occurs, how much does this dependency structure cost?
 
-This project answers that question for a representative €35B AUM EU-domiciled asset manager. It constructs the firm's ICT dependency graph using the DORA Article 3(22) criticality taxonomy, maps that graph against the November 2025 CTPP designation list, calibrates outage frequency and duration distributions from public incident histories, and runs a discrete-event simulation to produce a full annualized business interruption loss (BIL) distribution. The model's central finding is specific: 8 vendor entries in the Register collapse to 5 independent failure domains. The correlation structure those domains imply — in particular, the hidden shared dependency on AWS created by a sub-outsourced trading platform — produces a VaR 99 that is materially higher than the figure a naive independent-vendor model would estimate. That gap is the quantitative cost of treating the Register as a sufficient risk management tool rather than a necessary starting point.
+This project answers that question for a representative €35B AUM EU-domiciled asset manager. It constructs the firm's ICT dependency graph using the DORA Article 3(22) criticality taxonomy, maps that graph against the November 2025 CTPP designation list, calibrates outage frequency and duration distributions from public incident histories, and runs a discrete-event simulation to produce a full annualized business interruption loss (BIL) distribution. The model's central finding is specific: eight vendor entries in the Register collapse to five independent failure domains. The correlation structure those domains imply — in particular, the hidden shared dependency on AWS created by a sub-outsourced trading platform — produces a VaR 99 that is materially higher than the figure a naive independent-vendor model would estimate. That gap is the quantitative cost of treating the Register as a sufficient risk management tool rather than a necessary starting point.
 
 ## The DORA Concentration Risk Framework
 
@@ -875,6 +875,18 @@ ggplotly(p_exceed, tooltip = c("x", "y"))
 
 ### VaR summary table
 
+::: {.callout-note icon=false}
+
+## A primer on Value at Risk (VaR 95 and VaR 99)
+
+Value at Risk answers a specific question: what is the maximum loss a firm should expect to absorb in a given period, at a given level of confidence? A VaR 95 of €1M means that in 95 out of 100 simulated years, annual losses will not exceed €1M. The remaining 5% of years — the tail — will exceed that threshold by some amount. VaR 99 raises the confidence level: losses will exceed the stated figure in only 1 out of 100 years.
+
+The difference between VaR 95 and VaR 99 is not a technicality. It represents the additional buffer a firm needs to survive the worst 1% of outcomes rather than the worst 5%. For ICT operational risk — where tail events are driven by rare, high-severity outages rather than frequent small losses — that gap can be substantial. A firm that sizes its resilience planning to the 95th percentile has implicitly accepted the losses that occur in the remaining 1 in 20 years as unplanned exposure.
+
+In this model, VaR figures are expressed in euros and computed over a one-year horizon. They represent the annual business interruption loss the firm should plan to absorb at the stated confidence level, given its current ICT dependency structure and the calibrated outage frequency and duration parameters.
+
+:::
+
 ```{r}
 #| label: tbl-var-summary
 #| echo: true
@@ -929,25 +941,25 @@ decomp_var99 <- map_dfr(ctpp_list_sim, function(ctpp) {
 }) |>
   arrange(desc(contribution))
 
-p_decomp <- ggplot(decomp_var99,
-                   aes(x = contribution,
-                       y = reorder(ctpp, contribution),
-                       fill = ctpp == decomp_var99$ctpp[1])) +
-  geom_col(alpha = 0.9, width = 0.6) +
-  geom_text(aes(label = paste0("€", round(contribution, 2), "M")),
-            hjust = -0.1, size = 3.2, color = brand_text) +
-  scale_fill_manual(values = c(`TRUE`  = brand_highlight,
-                                `FALSE` = brand_accent),
-                    guide = "none") +
+decomp_var99 <- decomp_var99 |>
+  mutate(label = paste0("€", sprintf("%.2f", contribution), "M"))
+
+ggplot(decomp_var99,
+       aes(x = contribution,
+           y = reorder(ctpp, contribution))) +
+  geom_col(width = 0.6, alpha = 0.9, fill = brand_accent) +
+  geom_text(aes(label = label), hjust = -0.15, size = 3.5) +
   scale_x_continuous(
     labels = label_dollar(prefix = "€", suffix = "M", scale = 1),
-    expand = expansion(mult = c(0, 0.15))
+    expand = expansion(mult = c(0, 0.25))
   ) +
   labs(x = "VaR 99 contribution (€M)", y = NULL) +
-  theme_brand() +
-  theme(panel.grid.major.y = element_blank())
-
-ggplotly(p_decomp, tooltip = c("x", "y"))
+  theme_minimal() +
+  theme(
+    axis.text  = element_text(size = 11, color = brand_text),
+    axis.title = element_text(size = 11, color = brand_text),
+    panel.grid.major.y = element_blank()
+  )
 ```
 
 ### Sensitivity analysis
@@ -1029,10 +1041,14 @@ sens_c <- bind_rows(sens_c_list) |>
   mutate(scenario = factor(scenario, levels = paste0("AWS λ = ", aws_lambdas)))
 
 p_sens_c <- ggplot(sens_c, aes(x = total, color = scenario, fill = scenario)) +
-  geom_density(alpha = 0.15, linewidth = 0.7) +
-  scale_color_manual(values = c(brand_accent, brand_secondary, brand_highlight),
+  geom_density(alpha = 0.20, linewidth = 0.9) +
+  scale_color_manual(values = c("AWS λ = 0.1" = "#2ECC71",
+                                 "AWS λ = 0.2" = "#3498DB",
+                                 "AWS λ = 0.5" = "#E74C3C"),
                      name = NULL) +
-  scale_fill_manual( values = c(brand_accent, brand_secondary, brand_highlight),
+  scale_fill_manual( values = c("AWS λ = 0.1" = "#2ECC71",
+                                 "AWS λ = 0.2" = "#3498DB",
+                                 "AWS λ = 0.5" = "#E74C3C"),
                      name = NULL) +
   scale_x_continuous(labels = label_dollar(prefix = "€", suffix = "M", scale = 1),
                      limits = c(0, NA)) +
@@ -1051,7 +1067,7 @@ ggplotly(combined_sens)
 
 Four findings from the simulation carry board-relevant decision implications. They are not restatements of the model's mechanics — they are the outputs that change what a board should do.
 
-**The Register of Information is a necessary compliance artifact and an insufficient risk management tool.** The Register records that the firm has 8 critical vendor relationships. The network model shows those 8 relationships collapse to 5 independent failure domains. The VaR 99 under the correlated 5-domain model is materially higher than the naive 8-vendor model would produce, because two of those domains share an underlying CTPP that neither the Register's vendor count nor its concentration flags can express. The Register satisfies the DORA Article 28 disclosure obligation. It does not answer the question a board needs answered. Producing that answer requires the additional step this model takes: converting the dependency graph into a loss distribution.
+**The Register of Information is a necessary compliance artifact and an insufficient risk management tool.** The Register records that the firm has 8 critical vendor relationships. The network model shows those eight relationships collapse to five independent failure domains. The VaR 99 under the correlated 5-domain model is materially higher than the naive 8-vendor model would produce, because two of those domains share an underlying CTPP that neither the Register's vendor count nor its concentration flags can express. The Register satisfies the DORA Article 28 disclosure obligation. It does not answer the question a board needs answered. Producing that answer requires the additional step this model takes: converting the dependency graph into a loss distribution.
 
 **AWS is the single largest contributor to tail loss, and most of its exposure is invisible in Tier 1 disclosure.** The concentration decomposition in Figure 4 shows AWS as the dominant VaR 99 contributor. The reason is structural, not a function of the Poisson rate assumption: AWS is the only CTPP whose failure domain covers two firm services simultaneously — the direct cloud workloads and the TradeSaaS order management platform through its sub-outsourced dependency. A firm that reads its Register and sees one AWS entry and one TradeSaaS entry has misread its AWS concentration. The correct reading is: one failure event, two simultaneous service impairments, compounded BIL. RTS 2025/532 exists precisely to make this chain visible; this model quantifies what becomes visible when it is.
 
